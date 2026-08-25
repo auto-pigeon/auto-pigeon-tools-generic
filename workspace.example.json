@@ -1,0 +1,32 @@
+{
+  "schema": "auto-pigeon-toolkit-workspace/1.0",
+  "product": {
+    "id": "example-product",
+    "name": "Example Product"
+  },
+  "data_root": "../workspace-data",
+  "repositories": [
+    {
+      "alias": "api",
+      "path": "../example-api"
+    },
+    {
+      "alias": "web",
+      "path": "../example-web"
+    },
+    {
+      "alias": "automation",
+      "path": "../example-automation"
+    }
+  ],
+  "agents": {
+    "claude": {
+      "enabled": true,
+      "command": "claude"
+    },
+    "codex": {
+      "enabled": true,
+      "command": "codex"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# workspace.json is deliberately NOT ignored. It is one product's configuration
+# and belongs in that product's clone of this toolkit, in version control, where
+# the team can see which repositories the workspace has. This template repository
+# simply ships without one; ./init.sh --apply writes it, and
+# workspace.example.json is the reference to copy from.
+
+# CPython bytecode.
+__pycache__/
+*.pyc
