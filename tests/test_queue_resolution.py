@@ -190,6 +190,92 @@ class TestSequenceExtraction(WorkspaceCase):
         self.assertLess(command.index("20260801_01_First.md"),
                         command.index("20260801_02_Second.md"))
 
+    def test_a_queue_filter_narrows_the_census_it_reports_too(self) -> None:
+        """A one-repository report printed the whole workspace's totals —
+        "repositories inspected: 1 / prompts discovered: N / deferred: M" — with
+        not one of those M named anywhere below it, because the deferral was an
+        artefact of counting rather than a decision about a prompt. A repository
+        count and a prompt count that describe different sets cannot both be read
+        off one summary."""
+        self.add_prompt("api", "20260801_01_First.md")
+        self.add_prompt("web", "20260801_01_Other.md")
+        self.add_prompt("web", "20260801_02_Another.md")
+        plan = sequence_plan.build_plan(self.workspace, ["api"])
+        self.assertEqual({entry["app"] for entry in plan["census"]}, {"api"})
+        self.assertEqual(len(plan["census"]), 1)
+        self.assertEqual(len(plan["repositories"]), 1)
+        self.assertNotIn("deferred", {entry["state"] for entry in plan["census"]})
+        # The whole-workspace report still counts the whole workspace.
+        self.assertEqual(len(sequence_plan.build_plan(self.workspace)["census"]), 3)
+
+    def test_a_cross_repository_prerequisite_is_still_named_when_narrowed(self) -> None:
+        """The dependency graph stays workspace-wide even though the census does
+        not: the commonest reason a queue will not advance is a prompt in another
+        one, and the report has to be able to say so by name."""
+        self.add_prompt("web", "20260801_01_Base.md")
+        self.add_prompt(
+            "api", "20260801_01_Needs.md",
+            frontmatter="requires:\n  - repo: web\n    prompt: 20260801_01_Base.md",
+        )
+        plan = sequence_plan.build_plan(self.workspace, ["api"])
+        self.assertEqual(plan["steps"], [])
+        entry = next(item for item in plan["excluded"] if item["prompt"] == "20260801_01_Needs.md")
+        self.assertEqual(entry["state"], "deferred")
+        self.assertIn("web", entry["reason"])
+
+    def test_an_empty_queue_says_so_rather_than_unschedulable(self) -> None:
+        """Two facts that call for opposite reactions: finished work, versus a
+        queue full of prompts none of which can start."""
+        self.add_prompt("api", "20260801_01_First.md")
+        self.complete("api", "20260801_01_First.md")
+        report = sequence_plan.render_human(sequence_plan.build_plan(self.workspace, ["api"]))
+        self.assertIn("every queue inspected is empty", report)
+
+        self.add_prompt(
+            "api", "20260801_02_Second.md",
+            frontmatter="requires:\n  - 20260801_99_Missing",
+        )
+        report = sequence_plan.render_human(sequence_plan.build_plan(self.workspace, ["api"]))
+        self.assertIn("no queued prompt is currently schedulable", report)
+
+    def test_a_finished_but_unmoved_prompt_is_invalid_whatever_the_scope(self) -> None:
+        """The completed-but-not-moved guard is a statement about ONE file's own
+        state, so nothing another queue does may mask it. It used to sit below the
+        prerequisite chase, which gave one file two diagnoses depending on which
+        queues were in scope: a narrowed plan reported a prerequisite wait, and a
+        whole-workspace plan that scheduled that prerequisite reported the truth."""
+        self.add_prompt("web", "20260801_01_Base.md")
+        self.add_prompt(
+            "api", "20260801_01_Done.md",
+            frontmatter="requires:\n  - repo: web\n    prompt: 20260801_01_Base.md",
+        )
+        state = agent_task.resolve_state(
+            self.repos["api"], "20260801_01_Done.md", workspace=self.workspace)
+        agent_task.checkpoint(state, "complete")
+
+        result = resolver.resolve("api", self.data)
+        self.assertEqual(result.get("reason_code"), "completed_but_not_moved")
+        self.assertNotIn("requires", result["reason"])
+        for queues in (None, ["api"]):
+            plan = sequence_plan.build_plan(self.workspace, queues)
+            entry = next(
+                item for item in plan["excluded"] if item["prompt"] == "20260801_01_Done.md"
+            )
+            self.assertEqual(entry["state"], "invalid", queues)
+            self.assertIn("never moved", entry["reason"])
+
+    def test_an_unmet_prerequisite_still_blocks_an_unfinished_prompt(self) -> None:
+        """The reorder must not have turned the prerequisite chase off for the
+        ordinary case: no complete handoff, so the chase is still the answer."""
+        self.add_prompt(
+            "api", "20260801_01_Needs.md",
+            frontmatter="requires:\n  - 20260801_99_Missing",
+        )
+        result = resolver.resolve("api", self.data)
+        self.assertEqual(result["action"], "blocked")
+        self.assertNotIn("reason_code", result)
+        self.assertIn("requires", result["reason"])
+
     def test_the_plan_writes_nothing(self) -> None:
         self.add_prompt("api", "20260801_01_First.md")
         before = sorted(str(p) for p in self.data.rglob("*"))

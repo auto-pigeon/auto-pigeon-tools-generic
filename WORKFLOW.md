@@ -211,3 +211,15 @@ The planner does not decide selection itself — it calls the same resolver the
 runner calls, telling it to *assume* the steps already emitted are in `done/`. A
 planner that disagreed with the runner about what runs next would be worse than
 no planner: a confident wrong answer.
+
+`--queue` narrows what the report **counts and prints** — the state summary, the
+cycles, the unreadable-frontmatter list — to the queues asked about plus whatever
+they transitively require. It never narrows the dependency graph: the commonest
+reason a queue will not advance is a prompt in another one, and the report has to
+be able to name it. So a one-repository report counts that repository's prompts
+and no one else's, while still explaining a deferral with *"requires
+`<other>/<prompt>`, which is not in `done/`"*.
+
+An empty queue and a queue nothing in which can start are reported as the
+different things they are: *"every queue inspected is empty"* versus *"no queued
+prompt is currently schedulable"*.

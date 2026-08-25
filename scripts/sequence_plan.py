@@ -31,6 +31,16 @@ The classification, dependency-cycle report, duplicate detection and
 parallel-lane analysis on top of that are this module's own — but they are
 REPORTING over the resolver's answer, never a second opinion about it.
 
+WHAT `--queue` NARROWS, AND WHAT IT DELIBERATELY DOES NOT
+--------------------------------------------------------
+The dependency graph is always workspace-wide: a prompt waiting on another
+repository is the commonest reason a queue will not advance, and a planner that
+could not see into that queue would have to report "unknown" instead of the
+answer. Everything the report COUNTS or PRINTS, though, is narrowed to the
+queues asked about, plus whatever they transitively require. A state summary is
+a description of what was inspected; "repositories inspected: 1" over a census
+of the whole workspace is not a more generous answer, it is a contradictory one.
+
 WHAT "PARALLEL-SAFE" MEANS HERE
 -------------------------------
 Two prompts may go in different lanes only when every one of these holds:
@@ -328,10 +338,29 @@ def build_plan(workspace: workspace_config.Workspace, wanted: list[str] | None =
     else:
         selected = repositories
 
-    # The census covers EVERY discovered repository even when --queue narrows the
+    # The RECORDS cover EVERY discovered repository even when --queue narrows the
     # plan, because a cross-repository prerequisite in a queue nobody asked about
     # is exactly the fact that explains why a scheduled prompt is missing.
+    #
+    # The CENSUS is a different thing and must not inherit that reach. It is the
+    # report of what was INSPECTED, and a one-repository report printing the whole
+    # workspace's totals — "repositories inspected: 1 / prompts discovered: 493 /
+    # deferred: 15" — was not a bigger answer, it was a wrong one: the 493 were
+    # every queue's, and the 15 "deferred" were prompts in queues nobody had asked
+    # about and that this plan had never considered — none of them named anywhere
+    # in the report, because the deferral was an artefact of counting rather than
+    # a fact about a prompt. A repository count and a prompt count that describe
+    # different sets cannot both be read off one summary. So: records
+    # workspace-wide, census scoped.
     records = _prompt_records(data_root, repositories)
+    selected_apps = {repo["prompt_directory"] for repo in selected}
+    # Everything the scoped plan can be AFFECTED by: the queues asked about, plus
+    # whatever they require, transitively and across repositories. It is what
+    # decides which cycles and which unreadable-frontmatter faults are worth
+    # printing here — a cycle wholly inside a queue this report was not asked
+    # about cannot change any order below it, while one a scheduled prompt
+    # depends on is the whole explanation for why that prompt is missing.
+    scope = _scope_keys(records, selected_apps)
     cycles = _find_cycles(records)
     in_cycle: set[tuple[str, str]] = set()
     for cycle in cycles:
@@ -512,8 +541,15 @@ def build_plan(workspace: workspace_config.Workspace, wanted: list[str] | None =
         excluded_keys = {(entry["app"], entry["stem"]) for entry in excluded}
 
     scheduled_keys = {(step["app"], step["stem"]) for step in steps}
-    census = _census(records, scheduled_keys, excluded, duplicates, in_cycle)
+    census = _census(records, scheduled_keys, excluded, duplicates, in_cycle, selected_apps)
     lanes = _phases(steps, records)
+
+    # `in_cycle` above stays computed from EVERY cycle — a scheduled prompt caught
+    # in a cross-repository ring is invalid whatever the scope. Only what gets
+    # PRINTED is narrowed.
+    cycles = [
+        cycle for cycle in cycles if any(_cycle_key(label) in scope for label in cycle)
+    ]
 
     # UNREADABLE FRONTMATTER IS REPORTED, NEVER PLANNED AROUND. A prompt whose
     # dependency block the canonical decoder refused has unknown edges, and a
@@ -527,8 +563,8 @@ def build_plan(workspace: workspace_config.Workspace, wanted: list[str] | None =
                 "stem": record["stem"],
                 "error": record["malformed"],
             }
-            for record in records.values()
-            if record.get("malformed")
+            for key, record in records.items()
+            if record.get("malformed") and key in scope
         ),
         key=lambda entry: (entry["app"], entry["prompt"]),
     )
@@ -550,6 +586,35 @@ def build_plan(workspace: workspace_config.Workspace, wanted: list[str] | None =
     }
 
 
+def _cycle_key(label: str) -> tuple[str, str]:
+    """`app/stem` back into the key `records` is indexed by."""
+    app, _, stem = label.partition("/")
+    return (app, stem)
+
+
+def _scope_keys(
+    records: dict[tuple[str, str], dict], selected_apps: set[str]
+) -> set[tuple[str, str]]:
+    """Every prompt a report narrowed to `selected_apps` can be affected by.
+
+    The selected queues themselves, plus the transitive closure of what they
+    require — which is how a fault in a queue nobody asked about still gets
+    named when it is the reason a scheduled prompt cannot run. Anything outside
+    it is not this report's business: printing it is noise, and counting it is
+    the bug this exists to stop.
+    """
+    scope = {key for key, record in records.items() if record["app"] in selected_apps}
+    frontier = list(scope)
+    while frontier:
+        node = frontier.pop()
+        for requirement in records.get(node, {}).get("requires", []):
+            child = tuple(requirement)
+            if child in records and child not in scope:
+                scope.add(child)
+                frontier.append(child)
+    return scope
+
+
 def _app_of(repositories: list[dict], alias: str) -> str:
     for repo in repositories:
         if repo["alias"] == alias:
@@ -563,12 +628,21 @@ def _census(
     excluded: list[dict],
     duplicates: dict[tuple[str, str], str],
     in_cycle: set[tuple[str, str]],
+    selected_apps: set[str],
 ) -> list[dict]:
-    """Every discovered prompt, in one machine-readable state each."""
+    """Every prompt in the queues this report was ASKED ABOUT, one state each.
+
+    `selected_apps` is what `--queue` narrowed to, and the census honours it even
+    though `records` deliberately does not: a state summary is a description of
+    what was inspected, so a prompt in a queue this report never planned is not
+    "deferred" — it is out of scope, and has no state here at all.
+    """
     excluded_state = {(entry["app"], entry["stem"]): entry for entry in excluded}
     out: list[dict] = []
     for key in sorted(records):
         record = records[key]
+        if record["app"] not in selected_apps:
+            continue
         if record["location"] == DONE_DIRNAME:
             state, reason = "complete", "in done/"
             if record["handoff_status"] not in (None, "complete"):
@@ -867,7 +941,21 @@ def render_human(plan: dict) -> str:
         out.append("")
 
     if not plan["steps"]:
-        out.append("NOTHING TO RUN — no queued prompt is currently schedulable.")
+        # Two different facts wear the same headline otherwise, and they call for
+        # opposite reactions: an empty queue is finished work, while a queue full
+        # of prompts none of which can start is something to go and unblock.
+        outstanding = [entry for entry in plan["census"] if entry["location"] == "queue"]
+        if outstanding:
+            out.append("NOTHING TO RUN — no queued prompt is currently schedulable.")
+        else:
+            out.append(
+                "NOTHING TO RUN — every queue inspected is empty. Nothing is "
+                "outstanding:"
+            )
+            out.append(
+                f"  all {len(plan['census'])} prompts found are in "
+                f"{DONE_DIRNAME}/ or {BLOCKED_DIRNAME}/."
+            )
         return "\n".join(out) + "\n"
 
     out.append("RECOMMENDED SERIAL COMMAND — safe, and the one to paste if unsure")

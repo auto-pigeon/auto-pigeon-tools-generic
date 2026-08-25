@@ -444,6 +444,49 @@ def resolve(
 
     candidate = selectable[0]
 
+    # --- completed-but-not-moved guard ---
+    # Under this model a finished prompt leaves the queue. One that is still
+    # here but already has a `complete` handoff pinned to this exact file is
+    # an inconsistency (an interrupted task, or an agent that wrote the
+    # handoff and never made the move). Redoing finished work silently is the
+    # worst possible response, so say so loudly and let a human or the next
+    # agent make the one-line correction.
+    #
+    # THIS RUNS BEFORE THE PREREQUISITE CHASE, and the order is the point. It is
+    # a statement about THIS FILE's own state, and nothing another queue does can
+    # change it — so it must not be maskable by one. It used to sit below the
+    # chase, and a real prompt is what that cost: it was finished and never
+    # moved, and because it ALSO declared a prerequisite still outstanding in
+    # another repository, the report said "requires <other>/<prompt>, which is
+    # not in done/" — sending an operator to wait for work that would change
+    # nothing, while the one-line fix (move the file) went unmentioned. Worse,
+    # the diagnosis was not stable: a whole-workspace plan that happened to
+    # schedule that prerequisite first reported the same file as
+    # completed-but-not-moved, so the answer depended on which queues were in
+    # scope. A prompt's own state is not a matter of scope.
+    handoffs = _load_handoffs(handoff_dir)
+    existing = handoffs.get(candidate.stem)
+
+    if existing is not None and existing.status == "complete":
+        current_sha = hashlib.sha256(_read_text(candidate).encode("utf-8")).hexdigest()
+        if not existing.prompt_sha256 or existing.prompt_sha256.strip() == current_sha:
+            return {
+                "action": "blocked",
+                "reason": (
+                    f"{candidate.name} is still in the queue but {existing.path.name} "
+                    f"already records it complete for this exact file. It was finished "
+                    f"and never moved. Move it into {done_dir} (or delete the stale "
+                    "handoff if it is wrong) — it must not be silently re-run."
+                ),
+                "candidate": candidate.name,
+                "reason_code": "completed_but_not_moved",
+                "handoff": str(existing.path),
+            }
+        # SHA differs: the prompt was rewritten after being completed, so the
+        # handoff describes a different text. That is real new work.
+
+    resume = existing is not None and existing.status in ("in_progress", "partial", "failed")
+
     # --- prerequisite chain: walk to the root cause, not just the first gap ---
     # A prerequisite is satisfied iff its file sits in done/. Anything else —
     # still queued, sitting in blocked/, or not present at all — is unmet.
@@ -541,36 +584,6 @@ def resolve(
             "root_cause": root_cause,
             "unmet_chain": sorted(unmet),
         }
-
-    handoffs = _load_handoffs(handoff_dir)
-    existing = handoffs.get(candidate.stem)
-
-    # --- completed-but-not-moved guard ---
-    # Under this model a finished prompt leaves the queue. One that is still
-    # here but already has a `complete` handoff pinned to this exact file is
-    # an inconsistency (an interrupted task, or an agent that wrote the
-    # handoff and never made the move). Redoing finished work silently is the
-    # worst possible response, so say so loudly and let a human or the next
-    # agent make the one-line correction.
-    if existing is not None and existing.status == "complete":
-        current_sha = hashlib.sha256(_read_text(candidate).encode("utf-8")).hexdigest()
-        if not existing.prompt_sha256 or existing.prompt_sha256.strip() == current_sha:
-            return {
-                "action": "blocked",
-                "reason": (
-                    f"{candidate.name} is still in the queue but {existing.path.name} "
-                    f"already records it complete for this exact file. It was finished "
-                    f"and never moved. Move it into {done_dir} (or delete the stale "
-                    "handoff if it is wrong) — it must not be silently re-run."
-                ),
-                "candidate": candidate.name,
-                "reason_code": "completed_but_not_moved",
-                "handoff": str(existing.path),
-            }
-        # SHA differs: the prompt was rewritten after being completed, so the
-        # handoff describes a different text. That is real new work.
-
-    resume = existing is not None and existing.status in ("in_progress", "partial", "failed")
 
     return {
         "action": "run",
