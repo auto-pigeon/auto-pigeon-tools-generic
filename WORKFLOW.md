@@ -223,3 +223,10 @@ and no one else's, while still explaining a deferral with *"requires
 An empty queue and a queue nothing in which can start are reported as the
 different things they are: *"every queue inspected is empty"* versus *"no queued
 prompt is currently schedulable"*.
+
+When the plan has provably independent lanes, the block that orchestrates them
+**explains its own shell in comments** — what `&`, `=$!` and `wait "$…"` are
+doing, once in a header, then one line per phase and per barrier. The explanation
+has to survive being pasted, and the prose around the block does not get copied.
+The pid variables are named for where they are (`phase2_lane1`), and the comments
+are strictly additive: strip them and the executable lines are unchanged.

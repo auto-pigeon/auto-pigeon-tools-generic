@@ -10,6 +10,7 @@ that hang off it.
 from __future__ import annotations
 
 import json
+import re
 import os
 import subprocess
 import sys
@@ -275,6 +276,54 @@ class TestSequenceExtraction(WorkspaceCase):
         self.assertEqual(result["action"], "blocked")
         self.assertNotIn("reason_code", result)
         self.assertIn("requires", result["reason"])
+
+    def test_the_parallel_block_explains_its_own_shell_bookkeeping(self) -> None:
+        """`lane_1_0=$!` and `wait "$lane_1_0" || phase_failed=1` between two long
+        prompt filenames read as noise, or as errors the tool printed — reported
+        exactly that way. The explanation has to travel WITH the paste, so it is
+        in the block; the report's prose above it does not get copied."""
+        self.add_prompt(
+            "api", "20260801_01_A.md",
+            frontmatter="requires: []\nmutation_targets:\n  - api",
+        )
+        self.add_prompt(
+            "web", "20260801_01_B.md",
+            frontmatter="requires: []\nmutation_targets:\n  - web",
+        )
+        block = sequence_plan.build_plan(self.workspace)["parallel_command"]
+        self.assertNotEqual(block, "", "no parallel block was produced")
+        self.assertEqual(
+            subprocess.run(["bash", "-n"], input=block, text=True,
+                           capture_output=True).returncode, 0, block)
+        self.assertIn("shell bookkeeping", block)
+        self.assertIn("# PHASE 1 of 1", block)
+        self.assertIn("# lane 1 of 2", block)
+        self.assertIn("# BARRIER", block)
+        for name in re.findall(r"^(\S+)=\$!$", block, flags=re.MULTILINE):
+            self.assertRegex(name, r"^phase\d+_lane\d+$")
+
+    def test_comments_never_change_what_the_parallel_block_executes(self) -> None:
+        """The comments are additive. Strip every one and the executable lines
+        must be exactly what they were — a comment that swallowed a command, or a
+        `#` that landed mid-line, would be invisible in review."""
+        self.add_prompt(
+            "api", "20260801_01_A.md",
+            frontmatter="requires: []\nmutation_targets:\n  - api",
+        )
+        self.add_prompt(
+            "web", "20260801_01_B.md",
+            frontmatter="requires: []\nmutation_targets:\n  - web",
+        )
+        block = sequence_plan.build_plan(self.workspace)["parallel_command"]
+        executable = [
+            line for line in block.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertNotIn("#", "\n".join(executable))
+        self.assertEqual(executable[-1], "(( phase_failed == 0 )) || exit 1")
+        self.assertEqual(
+            subprocess.run(["bash", "-n"], input="\n".join(executable) + "\n",
+                           text=True, capture_output=True).returncode, 0)
 
     def test_the_plan_writes_nothing(self) -> None:
         self.add_prompt("api", "20260801_01_First.md")

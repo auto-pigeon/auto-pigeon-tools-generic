@@ -854,25 +854,72 @@ def render_parallel(phases: list[dict]) -> str:
     a failure in ANY lane (not merely the last one) sets the flag, and a
     dependent phase is only entered after the barrier passes. A `wait` on the
     last PID alone would report success while an earlier lane had failed.
+
+    IT IS COMMENTED, BECAUSE THE MACHINERY IS THE UNFAMILIAR PART. `x=$!` and
+    `wait "$x" || flag=1` are ordinary shell, but a reader meeting them between
+    two long prompt filenames reads them as noise, or as errors the tool printed
+    at them — which is what happened. The comments travel WITH the paste, where
+    the report's prose above the block does not, so they belong in the block.
+    They are the reason to print a plan rather than execute one: an operator can
+    check it first, and can only check what they can read.
+
+    The shell bookkeeping is explained ONCE, in the header, and each phase and
+    barrier then gets one line. Repeating the explanation at every phase was the
+    first attempt and it buried the commands it was there to introduce.
     """
     if not any(len(phase["lanes"]) > 1 for phase in phases):
         return ""
-    lines: list[str] = []
+    total = len(phases)
+    lines: list[str] = [
+        "# ==========================================================================",
+        "# A DEPENDENCY-ORDERED PLAN, IN PHASES",
+        "# ==========================================================================",
+        "# Everything inside one phase runs at the same time; each phase waits for the",
+        "# whole of the phase before it. Paste this into a terminal as it is, or save",
+        "# it as a script and run that.",
+        "#",
+        "# The lines that are not run-sequence.sh invocations are shell bookkeeping —",
+        "# not errors, and not output:",
+        "#",
+        "#   <command> &                start a lane in the BACKGROUND, without",
+        "#                              waiting for it to finish",
+        "#   phase2_lane1=$!            remember the process id of the lane just",
+        "#                              started, so it can be waited for by name",
+        "#   wait \"$phase2_lane1\" ...   block until that exact lane has finished",
+        "#",
+        "# Each barrier waits for EVERY lane in its phase and fails if ANY of them",
+        "# failed — waiting on the last lane alone would report success over a lane",
+        "# that had already died.",
+    ]
     for position, phase in enumerate(phases):
-        if position:
-            lines.append("")
-        if len(phase["lanes"]) == 1:
-            for group_index, group in enumerate(phase["lanes"][0]["invocations"]):
+        number = position + 1
+        lanes = phase["lanes"]
+        lines.append("")
+        if len(lanes) == 1:
+            lines.append(f"# PHASE {number} of {total} — ONE LANE, run in this order.")
+            lines.append("#   Nothing in it was proven independent of anything else here.")
+            for group_index, group in enumerate(lanes[0]["invocations"]):
                 block = _invocation(group["alias"], group["prompts"])
-                if group_index < len(phase["lanes"][0]["invocations"]) - 1:
+                if group_index < len(lanes[0]["invocations"]) - 1:
                     block[-1] = block[-1] + " && \\"
                 lines.extend(block)
             continue
+        lines.append(
+            f"# PHASE {number} of {total} — {len(lanes)} LANES, running AT THE SAME TIME."
+        )
+        lines.append(
+            "#   Each was proven independent of the others: no dependency either way,"
+        )
+        lines.append(
+            "#   disjoint declared mutation targets, different prompt/handoff folders."
+        )
         names: list[str] = []
-        for lane_index, lane in enumerate(phase["lanes"]):
-            name = f"lane_{position}_{lane_index}"
+        for lane_index, lane in enumerate(lanes):
+            name = f"phase{number}_lane{lane_index + 1}"
             names.append(name)
             invocations = lane["invocations"]
+            lines.append("")
+            lines.append(f"# lane {lane_index + 1} of {len(lanes)}")
             if len(invocations) == 1:
                 block = _invocation(invocations[0]["alias"], invocations[0]["prompts"])
                 block[-1] = block[-1] + " &"
@@ -886,7 +933,10 @@ def render_parallel(phases: list[dict]) -> str:
                     lines.extend(block)
                 lines.append(") &")
             lines.append(f"{name}=$!")
-            lines.append("")
+        lines.append("")
+        lines.append(
+            f"# BARRIER — wait for all {len(lanes)} lanes above; any failure stops the plan here."
+        )
         lines.append("phase_failed=0")
         for name in names:
             lines.append(f'wait "${name}" || phase_failed=1')
@@ -965,9 +1015,9 @@ def render_human(plan: dict) -> str:
 
     parallel = plan["parallel_command"]
     if parallel:
-        out.append("PARALLEL LANES — only pairs proven independent are in different lanes")
-        out.append("(disjoint declared mutation targets, no dependency either way, and")
-        out.append("different prompt/handoff folders. Anything unproven stays serial.)")
+        out.append("PARALLEL LANES — the same plan with every provably independent pair")
+        out.append("running at once. Anything unproven stays serial. The block explains")
+        out.append("its own shell, because the explanation has to survive being pasted.")
         out.append("")
         out.extend(parallel.rstrip("\n").splitlines())
         out.append("")
